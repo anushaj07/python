@@ -64,3 +64,35 @@ def process_file(file_path):
 # Process all Python files in current directory and subdirectories
 for py_file in Path('.').glob('**/*.py'):
     process_file(py_file)
+def add_private_key_setup(content):
+    """Add import and initialization if they don't already exist"""
+    new_import = "from db_conn_keyvault import private_key_bytes"
+    init_line = "snowflake_pkb = private_key_bytes()"
+
+    # Check if import already exists
+    if new_import not in content:
+        # Add import after last existing import
+        imports = re.findall(r'^(?:import|from\s+.+?import\s+).+', content, flags=re.MULTILINE)
+        if imports:
+            last_import = imports[-1]
+            content = content.replace(last_import, f"{last_import}\n{new_import}", 1)
+        else:
+            # Add at the top if no imports exist
+            content = f"{new_import}\n{content}"
+
+    # Check if initialization already exists
+    if init_line not in content:
+        # Add initialization in the appropriate location
+        main_block = re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:', content)
+        if main_block:
+            main_start = main_block.end()
+            main_part = content[main_start:]
+            indent = re.match(r'\s*', main_part).group()
+            content = (content[:main_start] 
+                       + f"\n{indent}{init_line}" 
+                       + main_part)
+        else:
+            # Add after the new import if no main block exists
+            content = content.replace(new_import, f"{new_import}\n{init_line}", 1)
+
+    return content
