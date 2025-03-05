@@ -96,3 +96,19 @@ def add_private_key_setup(content):
             content = content.replace(new_import, f"{new_import}\n{init_line}", 1)
 
     return content
+
+query_tag = (
+        'query_tag=f"{os.getenv(\'functionality\')}|'
+        '{os.getenv(\'envid\')}|{os.getenv(\'run_cycle_id\')}"'
+    )
+    
+    content = re.sub(
+        r'(snowflake\.connector\.connect|sf\.connect)\(([^)]*)',
+        lambda m: (
+            f"{m.group(1)}({m.group(2).rstrip(', ')}"  # Clean existing trailing commas
+            f", {query_tag})" if m.group(2).strip() 
+            else f"{m.group(1)}({query_tag})"
+        ),
+        content,
+        flags=re.DOTALL
+    )
