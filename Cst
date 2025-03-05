@@ -1,0 +1,142 @@
+import libcst as cst
+from pathlib import Path
+
+class SnowflakeConnectorTransformer(cst.CSTTransformer):
+    def __init__(self):
+        self.needs_migration = False
+        self.import_added = False
+        self.pkb_initialized = False
+
+    def leave_Call(self, original_node, updated_node):
+        # Check if this is a snowflake.connector.connect or sf.connect call
+        if self.is_snowflake_connect(updated_node):
+            return self.modify_connect_call(updated_node)
+        return updated_node
+
+    def is_snowflake_connect(self, node):
+        try:
+            names = [
+                "snowflake.connector.connect",
+                "sf.connect"
+            ]
+            return any(
+                node.func.value.value == name.split('.')[0] and
+                node.func.attr.value == name.split('.')[-1]
+                for name in names
+            )
+        except AttributeError:
+            return False
+
+    def modify_connect_call(self, node):
+        # Track if we need to add imports/initializations
+        self.needs_migration = True
+        
+        # Convert positional args to keyword args for easier manipulation
+        kwargs = {kw.arg.value: kw for kw in node.args if kw.keyword}
+        
+        # Replace password with private_key
+        if 'password' in kwargs:
+            del kwargs['password']
+        kwargs['private_key'] = cst.Arg(
+            keyword=cst.Name('private_key'),
+            value=cst.Name('snowflake_pkb'),
+            equal=cst.AssignEqual()
+        )
+
+        # Add query_tag if not present
+        if 'query_tag' not in kwargs:
+            query_tag_value = cst.Arg(
+                keyword=cst.Name('query_tag'),
+                value=cst.FormattedString(
+                    parts=[
+                        cst.FormattedStringExpression(
+                            cst.Call(
+                                func=cst.Attribute(
+                                    value=cst.Name('os'),
+                                    attr=cst.Name('getenv')
+                                ),
+                                args=[
+                                    cst.Arg(cst.SimpleString("'functionality'")),
+                                    cst.Arg(cst.SimpleString("'envid'")),
+                                    cst.Arg(cst.SimpleString("'run_cycle_id'"))
+                                ]
+                            )
+                        ),
+                        cst.FormattedStringText('|'),
+                        # Repeat similar for envid and run_cycle_id
+                    ]
+                )
+            )
+            kwargs['query_tag'] = query_tag_value
+
+        # Rebuild the node with new arguments
+        return node.with_changes(
+            args=[cst.Arg(**kw) for kw in kwargs.values()]
+        )
+
+    def leave_Module(self, original_node, updated_node):
+        # Add imports and initializations if needed
+        if not self.needs_migration:
+            return updated_node
+        
+        # Add import after last existing import
+        if not self.import_added:
+            new_import = cst.SimpleStatementLine(
+                body=[
+                    cst.ImportFrom(
+                        module=cst.Name('db_conn_keyvault'),
+                        names=[cst.ImportAlias(name=cst.Name('private_key_bytes'))],
+                        relative=cst.NoneSentinel()
+                    )
+                ]
+            )
+            updated_node = updated_node.with_changes(
+                body=self.insert_after_imports(updated_node.body, new_import)
+            )
+            self.import_added = True
+        
+        # Add private key initialization
+        if not self.pkb_initialized:
+            pkb_assignment = cst.SimpleStatementLine(
+                body=[
+                    cst.Assign(
+                        targets=[cst.AssignTarget(cst.Name('snowflake_pkb'))],
+                        value=cst.Call(
+                            func=cst.Name('private_key_bytes'),
+                            args=[]
+                        )
+                    )
+                ]
+            )
+            updated_node = updated_node.with_changes(
+                body=self.insert_in_main(updated_node.body, pkb_assignment)
+            )
+            self.pkb_initialized = True
+        
+        return updated_node
+
+    def insert_after_imports(self, body, new_node):
+        # Helper to insert after last import
+        # Implementation left for brevity
+        pass
+
+    def insert_in_main(self, body, new_node):
+        # Helper to insert in __main__ block
+        # Implementation left for brevity
+        pass
+
+def process_file(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        code = f.read()
+    
+    # Parse and modify code
+    transformer = SnowflakeConnectorTransformer()
+    modified_tree = cst.parse_module(code).visit(transformer)
+    
+    # Write changes back
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(modified_tree.code)
+
+# Process all Python files
+for py_file in Path('.').glob('**/*.py'):
+    process_file(py_file)
