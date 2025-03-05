@@ -1,0 +1,86 @@
+import re
+from pathlib import Path
+
+def needs_migration(content):
+    """Check if file contains password-based Snowflake authentication"""
+    return re.search(
+        r'(snowflake\.connector\.connect|sf\.connect)'
+        r'\(.*?password\s*=\s*[\w\.\[\]\'"]+',
+        content,
+        flags=re.DOTALL
+    )
+
+def add_private_key_setup(content):
+    """Add required imports and private key initialization"""
+    # Add import after last existing import
+    imports = re.findall(r'^(?:import|from\s+.+?import\s+).+', content, flags=re.MULTILINE)
+    new_import = "from db_conn_keyvault import private_key_bytes"
+    
+    if imports:
+        last_import = imports[-1]
+        content = content.replace(last_import, f"{last_import}\n{new_import}", 1)
+    else:
+        content = f"{new_import}\n{content}"
+
+    # Add private key initialization
+    main_block = re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:', content)
+    if main_block:
+        main_start = main_block.end()
+        main_part = content[main_start:]
+        indent = re.match(r'\s*', main_part).group()
+        content = (content[:main_start] 
+                   + f"\n{indent}snowflake_pkb = private_key_bytes()" 
+                   + main_part)
+    else:
+        content = content.replace(new_import, 
+                                f"{new_import}\nsnowflake_pkb = private_key_bytes()", 1)
+    
+    return content
+
+def migrate_connection(content):
+    """Replace password authentication and add query_tag"""
+    # Step 1: Replace password with private_key
+    content = re.sub(
+        r'(snowflake\.connector\.connect|sf\.connect)'
+        r'(\(.*?)password\s*=\s*[\w\.\[\]\'"]+',
+        r'\1\2private_key=snowflake_pkb',
+        content,
+        flags=re.DOTALL
+    )
+    
+    # Step 2: Add/update query_tag
+    query_tag = (
+        'query_tag=f"{os.getenv(\'functionality\')}|'
+        '{os.getenv(\'envid\')}|{os.getenv(\'run_cycle_id\')}"'
+    )
+    
+    content = re.sub(
+        r'(snowflake\.connector\.connect|sf\.connect)\(([^)]*)',
+        lambda m: (
+            f"{m.group(1)}({m.group(2).rstrip(', ')}"  # Clean existing trailing commas
+            f", {query_tag})" if m.group(2).strip() 
+            else f"{m.group(1)}({query_tag})"
+        ),
+        content,
+        flags=re.DOTALL
+    )
+    
+    return content
+
+def process_file(file_path):
+    with open(file_path, 'r+', encoding='utf-8') as f:
+        content = f.read()
+        
+        if not needs_migration(content):
+            return
+        
+        modified = add_private_key_setup(content)
+        modified = migrate_connection(modified)
+        
+        f.seek(0)
+        f.write(modified)
+        f.truncate()
+
+# Process all Python files
+for py_file in Path('.').glob('**/*.py'):
+    process_file(py_file)
