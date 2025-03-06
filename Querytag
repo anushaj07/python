@@ -2,67 +2,88 @@ import re
 import os
 from pathlib import Path
 
-QUERY_TAG_JSON = """{
-    "functionality": "{os.getenv('functionality')}",
-    "envid": "{os.getenv('envid')}",
-    "run_cycle_id": "{os.getenv('run_cycle_id')}"
-}"""
+def add_query_tag_config(content):
+    """Add query tag function import and initialization"""
+    # Add import for the query tag function
+    import_stmt = "from your_query_tag_module import get_query_tag"
+    content = re.sub(
+        r'^(import|from)',
+        f'{import_stmt}\n\\1',
+        content,
+        count=1,
+        flags=re.MULTILINE
+    )
 
-def add_query_tag(content):
-    # Pattern to find connect calls with indentation detection
+    # Add query tag initialization
+    main_block = re.search(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]\s*:', content)
+    if main_block:
+        main_start = main_block.end()
+        main_part = content[main_start:]
+        indent = re.match(r'\s*', main_part).group(0)
+        content = (content[:main_start] +
+                   f"\n{indent}query_tag = get_query_tag()" +
+                   main_part)
+    else:
+        content = content.replace(
+            import_stmt,
+            f"{import_stmt}\nquery_tag = get_query_tag()",
+            1
+        )
+
+    return content
+
+def modify_snowflake_connection(content):
+    """Add session_parameters with query tag to SF connect calls"""
+    # Pattern to find connect calls with various indentation
     pattern = r'''
-        (snowflake\.connector\.connect|sf\.connect)   # Connect method
-        \s*\(([^)]*)                                  # Capture parameters
-        (\))                                          # Closing parenthesis
+        (snowflake\.connector\.connect|sf\.connect)
+        \s*\(([\s\S]*?)\)  # Capture all parameters
     '''
-    
+
     def replacement(match):
         connect_method = match.group(1)
-        params = match.group(2).rstrip()
-        closing_paren = match.group(3)
+        params = match.group(2).strip()
         
-        # Detect indentation from last parameter line
-        last_line = params.split('\n')[-1] if '\n' in params else ''
-        indent = re.match(r'^\s*', last_line).group(0) if last_line else '    '
-        
-        # Format new parameter with proper indentation
-        new_param = f",\n{indent}session_parameters={{\n"
-        new_param += f"{indent}    'QUERY_TAG': f{QUERY_TAG_JSON}\n"
-        new_param += f"{indent}}}"
-        
-        # Handle existing parameters formatting
-        if not params.strip():
-            # Empty parameters case
-            return f"{connect_method}({new_param}\n)"
-        elif '\n' not in params:
-            # Single-line parameters
-            return f"{connect_method}({params}{new_param}{closing_paren})"
+        # Detect existing session_parameters
+        if 'session_parameters' in params:
+            # Update existing session parameters
+            return re.sub(
+                r'session_parameters\s*=\s*{',
+                'session_parameters={\n        \'QUERY_TAG\': query_tag,',
+                match.group(0),
+                flags=re.DOTALL
+            )
         else:
-            # Multi-line parameters
-            return f"{connect_method}(\n{params}{new_param}\n{closing_paren})"
+            # Add new session parameters with proper indentation
+            indent = ' ' * 4  # Default 4-space indent
+            if '\n' in params:
+                last_line = params.split('\n')[-1]
+                indent = re.match(r'^\s*', last_line).group(0)
+            
+            new_params = params.rstrip()
+            if new_params:
+                new_params += ',\n'
+            new_params += f'{indent}session_parameters={{\n'
+            new_params += f'{indent}    \'QUERY_TAG\': query_tag\n'
+            new_params += f'{indent}}}'
+            
+            return f'{connect_method}(\n{new_params}\n)'
 
     return re.sub(
         pattern,
         replacement,
         content,
-        flags=re.DOTALL | re.IGNORECASE | re.VERBOSE
+        flags=re.VERBOSE | re.DOTALL
     )
 
 def process_file(file_path):
     with open(file_path, 'r+', encoding='utf-8') as f:
         content = f.read()
         
-        # Add os import if missing
-        if 'import os' not in content:
-            content = re.sub(
-                r'^(import\s+)',
-                r'import os\n\1',
-                content,
-                count=1,
-                flags=re.MULTILINE
-            )
+        if 'get_query_tag' not in content:
+            content = add_query_tag_config(content)
         
-        modified = add_query_tag(content)
+        modified = modify_snowflake_connection(content)
         
         f.seek(0)
         f.write(modified)
